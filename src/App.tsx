@@ -1,42 +1,361 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronRight, Clock3, Mic, Pause, Play, Plus, RotateCcw, Search, Trash2, Volume2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { History, Mic, Plus, Search, Volume2 } from 'lucide-react';
+import type { Phrase, PracticeRecord, Take } from './types';
+import { uid } from './types';
+import { db } from './db';
+import { SEED_PHRASES } from './seed';
+import { calcStreak } from './format';
+import { backupFilename, buildBackup, buildPhraseExport, download, parseImport, phrasesFilename } from './io';
+import { playCompare, playRecording, stopPlayback } from './playback';
+import { LibraryPanel } from './components/LibraryPanel';
+import { PracticePanel } from './components/PracticePanel';
+import { HistoryView } from './components/HistoryView';
+import { AddPhraseModal, type NewPhrase } from './components/AddPhraseModal';
 
-type Phrase = { id: number; text: string; translation: string; tag: string; level: '入门'|'进阶'|'挑战'; status: 'new'|'practice'|'mastered'; attempts: number; last?: string };
-const seed: Phrase[] = [
-  { id: 1, text: 'The morning light feels different today.', translation: '今天的晨光感觉不一样。', tag: '日常', level: '入门', status: 'practice', attempts: 3, last: '今天 09:24' },
-  { id: 2, text: 'Could you walk me through the next step?', translation: '你能带我了解下一步吗？', tag: '工作', level: '进阶', status: 'new', attempts: 0 },
-  { id: 3, text: 'I appreciate your patience and thoughtful feedback.', translation: '感谢你的耐心和细致反馈。', tag: '表达', level: '挑战', status: 'mastered', attempts: 8, last: '昨天 18:10' },
-  { id: 4, text: 'Let’s make room for a little curiosity.', translation: '给好奇心留一点空间。', tag: '灵感', level: '入门', status: 'new', attempts: 0 },
-];
-const bars = Array.from({ length: 68 }, (_, i) => 18 + ((i * 29) % 44));
+const WEEK_GOAL = 20;
 
 export default function App() {
-  const [phrases, setPhrases] = useState<Phrase[]>(() => { try { return JSON.parse(localStorage.getItem('sound-lab-phrases') || '') || seed; } catch { return seed; } });
-  const [selected, setSelected] = useState(phrases[0]?.id ?? 1);
-  const [filter, setFilter] = useState('全部');
+  const [phrases, setPhrases] = useState<Phrase[] | null>(null);
+  const [records, setRecords] = useState<PracticeRecord[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [view, setView] = useState<'practice' | 'history'>('practice');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [recording, setRecording] = useState(false);
-  const [playing, setPlaying] = useState(false);
-  const [recorded, setRecorded] = useState(false);
-  const [seconds, setSeconds] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
-  const [newText, setNewText] = useState('');
-  const timer = useRef<number | undefined>(undefined);
-  const current = phrases.find(p => p.id === selected) ?? phrases[0];
-  const filtered = useMemo(() => phrases.filter(p => (filter === '全部' || p.tag === filter || p.level === filter || (filter === '待练' && p.status !== 'mastered')) && p.text.toLowerCase().includes(query.toLowerCase())), [phrases, filter, query]);
-  const tags = ['全部', ...Array.from(new Set(phrases.map(p => p.tag)))];
-  useEffect(() => { localStorage.setItem('sound-lab-phrases', JSON.stringify(phrases)); }, [phrases]);
-  useEffect(() => () => window.clearInterval(timer.current), []);
-  const startRecord = () => { if (recording) { setRecording(false); window.clearInterval(timer.current); setRecorded(true); setPhrases(ps => ps.map(p => p.id === selected ? {...p, attempts: p.attempts + 1, status: 'practice', last: '刚刚'} : p)); return; } setSeconds(0); setRecording(true); timer.current = window.setInterval(() => setSeconds(s => s + 1), 1000); };
-  const addPhrase = () => { if (!newText.trim()) return; const id = Date.now(); setPhrases(ps => [...ps, { id, text: newText.trim(), translation: '待补充译文', tag: '自定义', level: '入门', status: 'new', attempts: 0 }]); setSelected(id); setNewText(''); setShowAdd(false); };
-  const removePhrase = () => { if (!current) return; setPhrases(ps => ps.filter(p => p.id !== current.id)); setSelected(filtered.find(p => p.id !== current.id)?.id ?? phrases.find(p => p.id !== current.id)?.id ?? 0); };
-  return <div className="app-shell">
-    <aside className="sidebar"><div className="brand"><div className="brand-mark"><Volume2 size={19}/></div><div><strong>声线练习室</strong><span>Pronounce / practice</span></div></div><div className="side-label">我的练习</div><nav><button className="side-link active"><Mic size={17}/>练习库 <b>{phrases.length}</b></button><button className="side-link"><Clock3 size={17}/>练习记录</button><button className="side-link"><Check size={17}/>已掌握 <b>{phrases.filter(p => p.status === 'mastered').length}</b></button></nav><div className="sidebar-foot"><div className="streak"><span>连续练习</span><strong>5 <small>天</small></strong><i>↗ +2</i></div><div className="profile"><div className="avatar">YL</div><div><strong>Yuki Lin</strong><span>普通计划</span></div><ChevronRight size={16}/></div></div></aside>
-    <main className="main"><header className="topbar"><div><p className="eyebrow">WEDNESDAY, SEP 12</p><h1>今天练什么？</h1></div><div className="top-actions"><div className="search"><Search size={16}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索句子"/></div><button className="primary" onClick={() => setShowAdd(true)}><Plus size={17}/>添加句子</button></div></header>
-      <section className="stats"><div><span>本周完成</span><strong>12 <em>/ 20</em></strong><div className="progress"><i style={{width:'60%'}}/></div></div><div><span>练习时长</span><strong>38 <em>分钟</em></strong><small>比上周多 8 分钟</small></div><div><span>最佳发音</span><strong>92 <em>分</em></strong><small className="green">↑ 6 分</small></div></section>
-      <div className="content-grid"><section className="library"><div className="section-head"><div><h2>句子库</h2><p>选择一句开始你的声音训练</p></div><button className="ghost" onClick={() => setFilter('待练')}>只看待练</button></div><div className="filters">{tags.map(t => <button key={t} className={filter === t ? 'chip active' : 'chip'} onClick={() => setFilter(t)}>{t}</button>)}</div><div className="phrase-list">{filtered.map(p => <button key={p.id} onClick={() => {setSelected(p.id); setRecorded(false)}} className={p.id === selected ? 'phrase selected' : 'phrase'}><div className="phrase-icon">{p.status === 'mastered' ? <Check size={15}/> : <Mic size={15}/>}</div><div className="phrase-copy"><strong>{p.text}</strong><span>{p.translation}</span><div className="phrase-meta"><i>{p.tag}</i><i>{p.level}</i>{p.attempts > 0 && <small>{p.attempts} 次练习</small>}</div></div><ChevronRight size={17}/></button>)}{filtered.length === 0 && <div className="empty">没有找到匹配句子</div>}</div></section>
-        {current && <section className="practice"><div className="practice-head"><div><span className="label">CURRENT PHRASE</span><h2>跟着感觉读</h2></div><button className="icon-btn" onClick={removePhrase} title="删除句子"><Trash2 size={17}/></button></div><div className="focus-card"><div className="focus-tag">{current.tag} · {current.level}</div><p className="focus-text">{current.text}</p><p className="focus-translation">{current.translation}</p><div className="audio-sample"><button className="round-btn" onClick={() => setPlaying(!playing)}>{playing ? <Pause size={18}/> : <Play size={18}/>}</button><div className="sample-wave">{bars.map((h,i) => <i key={i} style={{height: `${h * (playing ? 1.15 : 0.72)}%`}}/> )}</div><span>0:08</span></div></div><div className="record-card"><div className="record-top"><div><span className="label">YOUR RECORDING</span><h3>{recorded ? '录音已保存，听听自己的声音' : '准备好后开始录音'}</h3></div><span className="record-time">{String(Math.floor(seconds / 60)).padStart(2,'0')}:{String(seconds % 60).padStart(2,'0')}</span></div><div className="record-wave">{bars.slice(5,58).map((h,i) => <i key={i} className={recording ? 'live' : ''} style={{height: `${h * (recording ? (0.4 + ((i%5)/7)) : 0.4)}%`}}/> )}</div><div className="record-actions"><button className={recording ? 'record-button recording' : 'record-button'} onClick={startRecord}><span>{recording ? <Pause size={16}/> : <Mic size={16}/>}</span>{recording ? '结束录音' : recorded ? '重新录音' : '开始录音'}</button>{recorded && <button className="secondary" onClick={() => setPlaying(!playing)}>{playing ? <Pause size={15}/> : <Play size={15}/>} 回放</button>}</div></div><div className="tip"><span>练习小贴士</span><p>放慢速度，先把每个音节读清楚，再自然地连起来。</p><RotateCcw size={15}/></div></section>}
+  const [dataStatus, setDataStatus] = useState<string | null>(null);
+  const [voiceURI, setVoiceURI] = useState<string | null>(() => localStorage.getItem('shadowing.voiceURI'));
+  const [rate, setRate] = useState<number>(() => {
+    const v = Number(localStorage.getItem('shadowing.rate'));
+    return v >= 0.5 && v <= 2 ? v : 1;
+  });
+
+  // Initial load from IndexedDB; seed the starter library on first launch.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        let ph = await db.getPhrases();
+        if (ph.length === 0 && !localStorage.getItem('shadowing.seeded')) {
+          await db.bulkImport(SEED_PHRASES, []);
+          localStorage.setItem('shadowing.seeded', '1');
+          ph = [...SEED_PHRASES];
+        }
+        const rec = await db.getRecords();
+        if (cancelled) return;
+        ph.sort((a, b) => a.createdAt - b.createdAt);
+        rec.sort((a, b) => b.createdAt - a.createdAt);
+        setPhrases(ph);
+        setRecords(rec);
+        setSelectedId(ph[0]?.id ?? null);
+      } catch (err) {
+        if (!cancelled) setLoadError(`本地数据加载失败：${(err as Error).message}`);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist voice settings.
+  useEffect(() => {
+    if (voiceURI) localStorage.setItem('shadowing.voiceURI', voiceURI);
+    else localStorage.removeItem('shadowing.voiceURI');
+  }, [voiceURI]);
+  useEffect(() => {
+    localStorage.setItem('shadowing.rate', String(rate));
+  }, [rate]);
+
+  // Stop any playback when switching phrases or views.
+  useEffect(() => {
+    stopPlayback();
+  }, [view, selectedId]);
+
+  const phrasesById = useMemo(() => new Map((phrases ?? []).map(p => [p.id, p])), [phrases]);
+  const recordsByPhrase = useMemo(() => {
+    const map = new Map<string, PracticeRecord[]>();
+    for (const r of records) {
+      const arr = map.get(r.phraseId);
+      if (arr) arr.push(r);
+      else map.set(r.phraseId, [r]);
+    }
+    return map;
+  }, [records]);
+
+  const libraryItems = useMemo(
+    () =>
+      (phrases ?? []).map(p => {
+        const rs = recordsByPhrase.get(p.id) ?? [];
+        return { ...p, attempts: rs.length, lastAt: rs[0]?.createdAt };
+      }),
+    [phrases, recordsByPhrase],
+  );
+
+  const stats = useMemo(() => {
+    const totalSec = records.reduce((s, r) => s + r.duration, 0);
+    const week = records.filter(r => r.createdAt >= Date.now() - 7 * 86400_000).length;
+    const avg = records.length ? records.reduce((s, r) => s + r.rating, 0) / records.length : 0;
+    return { count: records.length, totalSec, week, avg, streak: calcStreak(records.map(r => r.createdAt)) };
+  }, [records]);
+
+  const current = phrases?.find(p => p.id === selectedId) ?? null;
+
+  // ---- actions ------------------------------------------------------------
+
+  const addPhrase = (np: NewPhrase) => {
+    const p: Phrase = { id: uid(), createdAt: Date.now(), ...np };
+    setPhrases(ps => [...(ps ?? []), p]);
+    setSelectedId(p.id);
+    setShowAdd(false);
+    void db.putPhrase(p);
+  };
+
+  const deletePhrase = (id: string) => {
+    const recIds = (recordsByPhrase.get(id) ?? []).map(r => r.id);
+    const remaining = (phrases ?? []).filter(p => p.id !== id);
+    setPhrases(remaining);
+    setRecords(rs => rs.filter(r => r.phraseId !== id));
+    if (selectedId === id) setSelectedId(remaining[0]?.id ?? null);
+    void db.deletePhraseCascade(id, recIds);
+  };
+
+  const saveRecord = async (phraseId: string, take: Take, rating: number) => {
+    const rec: PracticeRecord = {
+      id: uid(),
+      phraseId,
+      createdAt: Date.now(),
+      duration: take.duration,
+      rating,
+      mimeType: take.mimeType,
+    };
+    await db.putRecord(rec, take.blob);
+    setRecords(rs => [rec, ...rs]);
+  };
+
+  const deleteRecord = (r: PracticeRecord) => {
+    if (!window.confirm('删除这条录音？此操作不可恢复。')) return;
+    setRecords(rs => rs.filter(x => x.id !== r.id));
+    void db.deleteRecord(r.id);
+  };
+
+  const rateRecord = (r: PracticeRecord, rating: number) => {
+    const updated = { ...r, rating };
+    setRecords(rs => rs.map(x => (x.id === r.id ? updated : x)));
+    void db.putRecord(updated);
+  };
+
+  const playRecord = async (r: PracticeRecord) => {
+    const blob = await db.getAudio(r.id);
+    if (blob) playRecording(`rec:${r.id}`, blob);
+  };
+
+  const compareRecord = async (r: PracticeRecord) => {
+    const blob = await db.getAudio(r.id);
+    const phrase = phrasesById.get(r.phraseId);
+    if (blob && phrase) playCompare(`cmp:${r.id}`, phrase.text, blob, { voiceURI, rate });
+  };
+
+  const importFile = async (file: File) => {
+    try {
+      const parsed = await parseImport(file);
+      const cur = phrases ?? [];
+      const ids = new Set(cur.map(p => p.id));
+      const texts = new Set(cur.map(p => p.text.trim().toLowerCase()));
+      const newPhrases = parsed.phrases.filter(
+        p => !ids.has(p.id) && !texts.has(p.text.trim().toLowerCase()),
+      );
+      const phraseIds = new Set([...ids, ...newPhrases.map(p => p.id)]);
+      const recIds = new Set(records.map(r => r.id));
+      const newRecords = parsed.records.filter(rw => !recIds.has(rw.record.id) && phraseIds.has(rw.record.phraseId));
+      await db.bulkImport(newPhrases, newRecords);
+      setPhrases([...cur, ...newPhrases].sort((a, b) => a.createdAt - b.createdAt));
+      setRecords(rs => [...newRecords.map(rw => rw.record), ...rs].sort((a, b) => b.createdAt - a.createdAt));
+      setDataStatus(`已导入 ${newPhrases.length} 个句子、${newRecords.length} 条录音（重复内容已自动跳过）`);
+    } catch (err) {
+      setDataStatus(`导入失败：${(err as Error).message}`);
+    }
+  };
+
+  const exportBackup = async () => {
+    if (!phrases) return;
+    const blob = await buildBackup(phrases, records, id => db.getAudio(id));
+    download(blob, backupFilename());
+    setDataStatus(`已导出完整备份：${phrases.length} 个句子、${records.length} 条录音`);
+  };
+
+  const exportPhrases = () => {
+    if (!phrases) return;
+    download(buildPhraseExport(phrases), phrasesFilename());
+    setDataStatus(`已导出题库（${phrases.length} 个句子）`);
+  };
+
+  const restoreSeeds = () => {
+    const cur = phrases ?? [];
+    const existing = new Set(cur.map(p => p.id));
+    const toAdd = SEED_PHRASES.filter(p => !existing.has(p.id));
+    if (toAdd.length === 0) return;
+    setPhrases([...cur, ...toAdd].sort((a, b) => a.createdAt - b.createdAt));
+    void db.bulkImport(toAdd, []);
+    if (!selectedId) setSelectedId(toAdd[0].id);
+    setDataStatus(`已恢复 ${toAdd.length} 个示例句子`);
+  };
+
+  // ---- render -------------------------------------------------------------
+
+  if (loadError) {
+    return (
+      <div className="loading-screen">
+        <p>{loadError}</p>
+        <p className="hint">请确认浏览器允许本站使用 IndexedDB 存储后刷新重试。</p>
       </div>
-    </main>{showAdd && <div className="modal-backdrop" onClick={() => setShowAdd(false)}><div className="modal" onClick={e => e.stopPropagation()}><div className="modal-head"><h2>添加练习句子</h2><button className="icon-btn" onClick={() => setShowAdd(false)}>×</button></div><label>英文句子<textarea autoFocus value={newText} onChange={e => setNewText(e.target.value)} placeholder="例如：I can make this happen."/></label><div className="modal-actions"><button className="secondary" onClick={() => setShowAdd(false)}>取消</button><button className="primary" onClick={addPhrase}>加入句子库</button></div></div></div>}
-  </div>;
+    );
+  }
+  if (phrases === null) {
+    return <div className="loading-screen">正在加载练习数据…</div>;
+  }
+
+  const dateStr = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">
+            <Volume2 size={19} />
+          </div>
+          <div>
+            <strong>跟读训练台</strong>
+            <span>SHADOWING LAB</span>
+          </div>
+        </div>
+        <div className="side-label">菜单</div>
+        <nav>
+          <button type="button" className={view === 'practice' ? 'side-link active' : 'side-link'} onClick={() => setView('practice')}>
+            <Mic size={17} />
+            练习库 <b>{phrases.length}</b>
+          </button>
+          <button type="button" className={view === 'history' ? 'side-link active' : 'side-link'} onClick={() => setView('history')}>
+            <History size={17} />
+            练习记录 <b>{records.length}</b>
+          </button>
+        </nav>
+        <div className="sidebar-foot">
+          <div className="streak">
+            <span>连续练习</span>
+            <strong>
+              {stats.streak} <small>天</small>
+            </strong>
+            <i>累计 {stats.count} 条录音</i>
+          </div>
+        </div>
+      </aside>
+
+      <main className="main">
+        {view === 'practice' ? (
+          <>
+            <header className="topbar">
+              <div>
+                <p className="eyebrow">{dateStr}</p>
+                <h1>今天练什么？</h1>
+              </div>
+              <div className="top-actions">
+                <div className="search">
+                  <Search size={16} />
+                  <input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索句子" />
+                </div>
+                <button type="button" className="primary" onClick={() => setShowAdd(true)}>
+                  <Plus size={17} />
+                  添加句子
+                </button>
+              </div>
+            </header>
+
+            <section className="stats">
+              <div>
+                <span>本周练习（目标 {WEEK_GOAL} 次）</span>
+                <strong>
+                  {stats.week} <em>/ {WEEK_GOAL}</em>
+                </strong>
+                <div className="progress">
+                  <i style={{ width: `${Math.min(100, (stats.week / WEEK_GOAL) * 100)}%` }} />
+                </div>
+              </div>
+              <div>
+                <span>累计录音</span>
+                <strong>
+                  {Math.round(stats.totalSec / 60)} <em>分钟</em>
+                </strong>
+                <small>共 {stats.count} 条录音</small>
+              </div>
+              <div>
+                <span>平均自评</span>
+                <strong>
+                  {stats.count ? stats.avg.toFixed(1) : '—'} <em>星</em>
+                </strong>
+                <small className="green">来自每次保存时的自评分</small>
+              </div>
+            </section>
+
+            <div className="content-grid">
+              <LibraryPanel
+                items={libraryItems}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                query={query}
+                importStatus={dataStatus}
+                onImportFile={f => void importFile(f)}
+                onExportPhrases={exportPhrases}
+                onExportBackup={() => void exportBackup()}
+                onRestoreSeeds={restoreSeeds}
+              />
+              {current ? (
+                <PracticePanel
+                  phrase={current}
+                  records={recordsByPhrase.get(current.id) ?? []}
+                  voiceURI={voiceURI}
+                  rate={rate}
+                  onVoiceChange={setVoiceURI}
+                  onRateChange={setRate}
+                  onSaveRecord={(take, rating) => saveRecord(current.id, take, rating)}
+                  onDeletePhrase={() => deletePhrase(current.id)}
+                  onPlayRecord={r => void playRecord(r)}
+                  onCompareRecord={r => void compareRecord(r)}
+                  onDeleteRecord={deleteRecord}
+                  onRateRecord={rateRecord}
+                  onShowHistory={() => setView('history')}
+                />
+              ) : (
+                <section className="practice">
+                  <div className="empty empty-practice">
+                    <Mic size={26} />
+                    <p>句子库是空的。添加第一句，或从文件导入题库。</p>
+                    <button type="button" className="primary" onClick={() => setShowAdd(true)}>
+                      <Plus size={16} /> 添加句子
+                    </button>
+                  </div>
+                </section>
+              )}
+            </div>
+          </>
+        ) : (
+          <HistoryView
+            records={records}
+            phrasesById={phrasesById}
+            onPlayRecord={r => void playRecord(r)}
+            onCompareRecord={r => void compareRecord(r)}
+            onDeleteRecord={deleteRecord}
+            onRateRecord={rateRecord}
+            onGoPractice={() => setView('practice')}
+          />
+        )}
+      </main>
+
+      {showAdd && (
+        <AddPhraseModal
+          existingTags={Array.from(new Set(phrases.map(p => p.tag)))}
+          onClose={() => setShowAdd(false)}
+          onSubmit={addPhrase}
+        />
+      )}
+    </div>
+  );
 }
